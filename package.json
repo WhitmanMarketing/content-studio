@@ -1,0 +1,13 @@
+{
+  "name": "content-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-assisted social media content studio — serves the app and proxies OpenAI",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
