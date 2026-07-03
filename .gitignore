@@ -1,0 +1,12 @@
+# Local Claude Code / editor config (machine-specific)
+.claude/
+
+# Build artifact for the claude.ai demo (generated from content-studio.html)
+content-studio-artifact.html
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+
+# Node (if proxy tooling is added later)
+node_modules/

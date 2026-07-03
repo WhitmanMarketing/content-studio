@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Content Studio — Advisory Marketing</title>
+<!--
+  ============================================================================
+  AI-Assisted Social Media Content Studio (single-file build)
+  ----------------------------------------------------------------------------
+  AI INTEGRATION NOTE — ONE PROVIDER (OpenAI) for everything:
+  A single OpenAI API key (Settings → OpenAI API key) powers all stages.
+
+  TEXT stages (Calendar, Draft, Create, Video Script):
+    POST https://api.openai.com/v1/chat/completions with model "gpt-5.5".
+    NOTE: GPT-5 models use "max_completion_tokens" (not "max_tokens").
+    Messages are [{role:system,...},{role:user,...}]; the reply is read from
+    choices[0].message.content. Calendar asks for JSON-only and is parsed
+    defensively (fences stripped, outer array extracted).
+
+  IMAGE stage:
+    POST https://api.openai.com/v1/images/generations with model "gpt-image-2".
+    The response is base64 PNG (data[0].b64_json), stored as a data URL on the post.
+    If a reference image is uploaded, generation instead POSTs multipart/form-data
+    to https://api.openai.com/v1/images/edits (image-to-image). Uploaded refs are
+    downscaled to 1024px client-side before storing/sending.
+    SECURITY: a raw key in client-side code is exposed to anything on the page —
+    fine for local testing, but proxy the key server-side for real/shared use.
+    Large images can exceed the ~5MB localStorage quota; on overflow the app
+    warns and keeps the image in memory for the session (export JSON to retain).
+  ============================================================================
+-->
+<style>
+  :root{
+    --navy:#0f2740;
+    --navy-2:#173a5e;
+    --navy-3:#1e4976;
+    --accent:#c9a24b;         /* single warm gold accent */
+    --accent-dark:#a8842f;
+    --bg:#f4f6f9;
+    --panel:#ffffff;
+    --ink:#1a2733;
+    --ink-soft:#5a6b7b;
+    --line:#e2e8f0;
+    --line-strong:#cbd5e1;
+    --shadow:0 1px 3px rgba(15,39,64,.08),0 8px 24px rgba(15,39,64,.06);
+    --radius:10px;
+    /* status colors */
+    --s-idea:#94a3b8;
+    --s-draft:#3b82f6;
+    --s-review:#f59e0b;
+    --s-approved:#16a34a;
+    --s-scheduled:#8b5cf6;
+    --s-posted:#0f766e;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--ink); font-size:14px; line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font-family:inherit;cursor:pointer;}
+  input,select,textarea{font-family:inherit;font-size:14px;}
+  a{color:var(--navy-3);}
+  h1,h2,h3,h4{margin:0;font-weight:600;color:var(--navy);}
+
+  /* ---------- Top bar ---------- */
+  .topbar{
+    background:var(--navy); color:#fff; padding:12px 20px;
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    box-shadow:0 2px 8px rgba(0,0,0,.12); position:sticky; top:0; z-index:50;
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;letter-spacing:.2px;}
+  .brand .mark{
+    width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,var(--accent),var(--accent-dark));
+    display:flex;align-items:center;justify-content:center;color:var(--navy);font-weight:800;font-size:15px;
+  }
+  .brand small{display:block;font-weight:400;font-size:11px;color:#9db4cc;letter-spacing:.3px;}
+  .topbar .spacer{flex:1;}
+  .month-nav{display:flex;align-items:center;gap:6px;}
+  .month-nav b{min-width:150px;text-align:center;font-size:15px;}
+  .icon-btn{
+    background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:#fff;
+    border-radius:8px;padding:7px 12px;font-size:13px;transition:background .15s;white-space:nowrap;
+  }
+  .icon-btn:hover{background:rgba(255,255,255,.18);}
+  .icon-btn.round{padding:7px 11px;}
+  .btn{
+    border:none;border-radius:8px;padding:9px 15px;font-size:13px;font-weight:600;transition:filter .15s,background .15s;white-space:nowrap;
+  }
+  .btn:hover{filter:brightness(1.06);}
+  .btn-accent{background:var(--accent);color:var(--navy);}
+  .btn-primary{background:var(--navy-3);color:#fff;}
+  .btn-ghost{background:transparent;border:1px solid var(--line-strong);color:var(--ink);}
+  .btn-ghost:hover{background:#f1f5f9;filter:none;}
+  .btn-danger{background:#dc2626;color:#fff;}
+  .btn-sm{padding:6px 11px;font-size:12px;}
+  .toggle{display:flex;background:rgba(255,255,255,.08);border-radius:8px;padding:3px;border:1px solid rgba(255,255,255,.14);}
+  .toggle button{background:transparent;border:none;color:#c6d5e5;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;}
+  .toggle button.active{background:var(--accent);color:var(--navy);}
+  .search{
+    display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.16);
+    border-radius:8px;padding:6px 10px;
+  }
+  .search input{background:transparent;border:none;color:#fff;outline:none;width:150px;}
+  .search input::placeholder{color:#9db4cc;}
+
+  /* ---------- Layout ---------- */
+  .wrap{padding:18px 20px 60px;max-width:1500px;margin:0 auto;}
+  .subbar{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:16px;}
+  .filters{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;flex:1;min-width:300px;box-shadow:var(--shadow);
+  }
+  .field{display:flex;flex-direction:column;gap:4px;}
+  .field label{font-size:11px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
+  .field select,.field input{
+    border:1px solid var(--line-strong);border-radius:7px;padding:7px 9px;background:#fff;color:var(--ink);min-width:130px;
+  }
+  .stats{display:flex;gap:10px;flex-wrap:wrap;}
+  .stat-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:10px 14px;min-width:96px;box-shadow:var(--shadow);
+  }
+  .stat-card .n{font-size:22px;font-weight:700;color:var(--navy);}
+  .stat-card .l{font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
+  .stat-mini{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;}
+  .chip-mini{font-size:11px;background:#eef2f7;border-radius:20px;padding:2px 8px;color:var(--ink-soft);}
+
+  /* ---------- Calendar ---------- */
+  .cal-head,.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;}
+  .cal-head{margin-bottom:8px;}
+  .cal-head div{font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;text-align:center;padding:4px;}
+  .cal-cell{
+    background:var(--panel);border:1px solid var(--line);border-radius:9px;min-height:112px;padding:6px;
+    display:flex;flex-direction:column;gap:4px;transition:box-shadow .15s,border-color .15s;
+  }
+  .cal-cell.out{background:#eef1f5;opacity:.65;}
+  .cal-cell.today{border-color:var(--accent);box-shadow:0 0 0 2px rgba(201,162,75,.25);}
+  .cal-cell .daynum{font-size:12px;font-weight:600;color:var(--ink-soft);display:flex;justify-content:space-between;align-items:center;}
+  .cal-cell .add{opacity:0;border:none;background:var(--navy-3);color:#fff;border-radius:6px;width:20px;height:20px;line-height:1;font-size:14px;padding:0;transition:opacity .12s;}
+  .cal-cell:hover .add{opacity:1;}
+  .post-chip{
+    border-left:3px solid var(--s-idea);background:#f8fafc;border-radius:6px;padding:4px 6px;cursor:pointer;
+    font-size:11.5px;line-height:1.25;transition:background .12s,transform .05s;overflow:hidden;
+  }
+  .post-chip:hover{background:#eef2f7;}
+  .post-chip:active{transform:scale(.99);}
+  .post-chip .pt{font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .post-chip .pm{color:var(--ink-soft);font-size:10.5px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:2px;}
+  .vid-tag{background:var(--accent);color:var(--navy);border-radius:4px;padding:0 4px;font-size:9px;font-weight:700;}
+  .chip-thumb{width:100%;height:36px;object-fit:cover;border-radius:5px;margin-bottom:4px;display:block;background:#e8eef5;}
+  .chip-thumb.ph{display:flex;align-items:center;justify-content:center;color:#9db4cc;font-size:15px;background:linear-gradient(135deg,#eef2f7,#dbe4ee);}
+  .list-thumb{width:44px;height:44px;flex:0 0 44px;object-fit:cover;border-radius:6px;background:#eef2f7;display:block;}
+  .list-thumb.ph{display:flex;align-items:center;justify-content:center;color:#9db4cc;font-size:17px;background:linear-gradient(135deg,#eef2f7,#dbe4ee);}
+  .list-thumb.none{background:#f1f5f9;border:1px dashed var(--line-strong);}
+
+  /* ---------- List / table ---------- */
+  .list-wrap{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);}
+  table{width:100%;border-collapse:collapse;}
+  th,td{text-align:left;padding:11px 12px;font-size:13px;border-bottom:1px solid var(--line);}
+  th{background:#f7f9fc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-soft);cursor:pointer;user-select:none;}
+  th:hover{color:var(--navy);}
+  tbody tr{cursor:pointer;transition:background .1s;}
+  tbody tr:hover{background:#f7f9fc;}
+  td .ttl{font-weight:600;color:var(--navy);}
+  .empty{padding:50px 20px;text-align:center;color:var(--ink-soft);}
+  .empty h3{color:var(--ink-soft);font-weight:600;margin-bottom:6px;}
+
+  /* ---------- Pills ---------- */
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;border-radius:20px;padding:3px 10px;white-space:nowrap;}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .pf{display:inline-block;font-size:10.5px;background:#eef2f7;color:var(--ink-soft);border-radius:5px;padding:1px 6px;margin-right:3px;}
+
+  /* ---------- Modal / panel ---------- */
+  .overlay{position:fixed;inset:0;background:rgba(15,39,64,.42);z-index:100;display:none;}
+  .overlay.show{display:block;}
+  .panel{
+    position:fixed;top:0;right:0;height:100%;width:640px;max-width:100%;background:var(--bg);
+    z-index:101;box-shadow:-8px 0 30px rgba(15,39,64,.2);display:flex;flex-direction:column;
+    transform:translateX(100%);transition:transform .25s ease;
+  }
+  .panel.show{transform:translateX(0);}
+  .panel-head{background:var(--navy);color:#fff;padding:16px 20px;display:flex;align-items:center;gap:12px;}
+  .panel-head h2{color:#fff;font-size:16px;flex:1;}
+  .panel-head .x{background:rgba(255,255,255,.12);border:none;color:#fff;width:30px;height:30px;border-radius:7px;font-size:17px;}
+  .panel-head .x:hover{background:rgba(255,255,255,.24);}
+  .panel-body{flex:1;overflow-y:auto;padding:18px 20px;}
+  .panel-foot{border-top:1px solid var(--line);background:var(--panel);padding:12px 20px;display:flex;gap:10px;align-items:center;}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
+  .card h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--navy-3);margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .row{display:flex;gap:12px;flex-wrap:wrap;}
+  .row>.grow{flex:1;min-width:150px;}
+  .form-field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px;}
+  .form-field>label{font-size:12px;font-weight:600;color:var(--ink-soft);}
+  .form-field input,.form-field select,.form-field textarea{
+    width:100%;border:1px solid var(--line-strong);border-radius:8px;padding:9px 11px;background:#fff;color:var(--ink);
+  }
+  .form-field textarea{resize:vertical;min-height:70px;line-height:1.5;}
+  .form-field input:focus,.form-field select:focus,.form-field textarea:focus{outline:none;border-color:var(--navy-3);box-shadow:0 0 0 3px rgba(30,73,118,.12);}
+  .hint{font-size:11px;color:var(--ink-soft);}
+  .charcount{font-size:11px;color:var(--ink-soft);text-align:right;}
+  .charcount.warn{color:#dc2626;font-weight:600;}
+
+  .multi{display:flex;gap:6px;flex-wrap:wrap;}
+  .multi label{
+    display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-strong);border-radius:20px;
+    padding:5px 11px;font-size:12px;cursor:pointer;user-select:none;background:#fff;transition:all .12s;
+  }
+  .multi label.on{background:var(--navy-3);color:#fff;border-color:var(--navy-3);}
+  .multi input{display:none;}
+
+  /* Stage stepper */
+  .stepper{display:flex;gap:0;margin-bottom:16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);}
+  .step{flex:1;padding:12px 8px;text-align:center;border-right:1px solid var(--line);position:relative;cursor:pointer;transition:background .12s;}
+  .step:last-child{border-right:none;}
+  .step:hover{background:#f7f9fc;}
+  .step.active{background:var(--navy);color:#fff;}
+  .step.active .s-sub{color:#9db4cc;}
+  .step.done .s-num{background:var(--s-approved);color:#fff;}
+  .step.locked{opacity:.45;cursor:not-allowed;}
+  .s-num{display:inline-flex;width:22px;height:22px;border-radius:50%;background:#e2e8f0;color:var(--ink-soft);align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-bottom:4px;}
+  .step.active .s-num{background:var(--accent);color:var(--navy);}
+  .s-name{font-size:12.5px;font-weight:600;}
+  .s-sub{font-size:10px;color:var(--ink-soft);}
+
+  .gen-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+  .gen-bar .desc{font-size:12px;color:var(--ink-soft);flex:1;min-width:180px;}
+
+  .loading{display:flex;align-items:center;gap:10px;color:var(--navy-3);font-size:13px;padding:14px;background:#eef4fb;border-radius:8px;margin-bottom:12px;}
+  .spinner{width:18px;height:18px;border:2.5px solid #c7d7e8;border-top-color:var(--navy-3);border-radius:50%;animation:spin .7s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .errbox{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:8px;padding:12px;margin-bottom:12px;font-size:13px;}
+  .errbox .raw{margin-top:8px;background:#fff;border:1px solid #fecaca;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:150px;overflow:auto;color:#7f1d1d;}
+  .banner-warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:9px 12px;font-size:12px;margin-bottom:12px;}
+
+  /* Brief modal (centered) */
+  .modal{
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-48%);z-index:101;background:var(--bg);
+    width:620px;max-width:94vw;max-height:92vh;border-radius:14px;overflow:hidden;display:none;flex-direction:column;
+    box-shadow:0 20px 60px rgba(15,39,64,.35);
+  }
+  .modal.show{display:flex;}
+  .modal .panel-body{background:var(--bg);}
+  .modal-mini{width:440px;}
+
+  .kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px;}
+  .kv:last-child{border:none;}
+  .kv b{color:var(--navy);font-weight:600;}
+
+  .toast{
+    position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(30px);
+    background:var(--navy);color:#fff;padding:11px 20px;border-radius:10px;font-size:13px;z-index:200;
+    opacity:0;transition:all .25s;box-shadow:0 8px 24px rgba(0,0,0,.25);pointer-events:none;
+  }
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  .toast.err{background:#b91c1c;}
+
+  .tag-editor{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+  .tag-editor .tg{display:inline-flex;align-items:center;gap:5px;background:#eef2f7;border-radius:6px;padding:4px 8px;font-size:12px;}
+  .tag-editor .tg button{border:none;background:none;color:var(--ink-soft);font-size:14px;padding:0;line-height:1;}
+  .tag-editor input{border:1px dashed var(--line-strong);border-radius:6px;padding:5px 8px;width:130px;}
+
+  .foot-note{font-size:11px;color:var(--ink-soft);text-align:center;padding:20px;}
+
+  @media (max-width:820px){
+    .cal-cell{min-height:80px;}
+    .panel{width:100%;}
+    .search input{width:100px;}
+  }
+
+  /* ---------- Print (monthly calendar) ---------- */
+  @media print{
+    .topbar,.subbar,.toggle,.no-print,.icon-btn,.btn{display:none !important;}
+    body{background:#fff;}
+    .wrap{padding:0;max-width:100%;}
+    .cal-cell{min-height:96px;border:1px solid #999;break-inside:avoid;}
+    .print-title{display:block !important;text-align:center;margin:0 0 12px;font-size:20px;}
+    .cal-cell .add{display:none;}
+  }
+  .print-title{display:none;}
+</style>
+</head>
+<body>
+
+<!-- ============ TOP BAR ============ -->
+<div class="topbar">
+  <div class="brand">
+    <div class="mark">CS</div>
+    <div>Content Studio<small>Advisory Marketing</small></div>
+  </div>
+
+  <div class="month-nav no-print">
+    <button class="icon-btn round" onclick="shiftMonth(-1)">‹</button>
+    <b id="monthLabel">—</b>
+    <button class="icon-btn round" onclick="shiftMonth(1)">›</button>
+    <button class="icon-btn" onclick="goToday()">Today</button>
+  </div>
+
+  <div class="toggle no-print">
+    <button id="viewCalBtn" class="active" onclick="setView('calendar')">Calendar</button>
+    <button id="viewListBtn" onclick="setView('list')">List</button>
+  </div>
+
+  <div class="search no-print">
+    <span>🔍</span>
+    <input id="searchInput" placeholder="Search posts…" oninput="onSearch(this.value)">
+  </div>
+
+  <div class="spacer"></div>
+
+  <button class="btn btn-accent no-print" onclick="openBrief()">✦ Generate Calendar</button>
+  <button class="btn btn-primary no-print" onclick="openEditor(null)">+ New Post</button>
+  <button class="icon-btn no-print" onclick="window.print()">🖨 Print</button>
+  <button class="icon-btn no-print" onclick="openMenu()">⋯</button>
+</div>
+
+<div class="wrap">
+  <h2 class="print-title" id="printTitle"></h2>
+
+  <!-- ============ FILTERS + STATS ============ -->
+  <div class="subbar no-print">
+    <div class="filters">
+      <div class="field">
+        <label>Platform</label>
+        <select id="fltPlatform" onchange="render()"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Pillar</label>
+        <select id="fltPillar" onchange="render()"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <select id="fltStatus" onchange="render()"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>From</label>
+        <input type="date" id="fltFrom" onchange="render()">
+      </div>
+      <div class="field">
+        <label>To</label>
+        <input type="date" id="fltTo" onchange="render()">
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="clearFilters()">Clear</button>
+    </div>
+
+    <div class="stats" id="statsBox"></div>
+  </div>
+
+  <!-- ============ MAIN VIEW ============ -->
+  <div id="calendarView">
+    <div class="cal-head" id="calHead"></div>
+    <div class="cal-grid" id="calGrid"></div>
+  </div>
+
+  <div id="listView" style="display:none;">
+    <div class="list-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="sortList('date')">Date</th>
+            <th onclick="sortList('title')">Title</th>
+            <th onclick="sortList('platforms')">Platform</th>
+            <th onclick="sortList('pillar')">Pillar</th>
+            <th onclick="sortList('status')">Status</th>
+            <th>Owner</th>
+          </tr>
+        </thead>
+        <tbody id="listBody"></tbody>
+      </table>
+      <div id="listEmpty" class="empty" style="display:none;">
+        <h3>No posts match your filters</h3>
+        <div>Try clearing filters, or generate a calendar to get started.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot-note">
+    All data is stored locally in your browser (localStorage). Nothing auto-publishes. Export regularly to back up.
+  </div>
+</div>
+
+<!-- ============ OVERLAY ============ -->
+<div class="overlay" id="overlay" onclick="onOverlayClick(event)"></div>
+
+<!-- ============ POST EDITOR PANEL ============ -->
+<div class="panel" id="editorPanel">
+  <div class="panel-head">
+    <h2 id="editorTitle">Post</h2>
+    <span class="pill" id="editorStatusPill"></span>
+    <button class="x" onclick="closeEditor()">✕</button>
+  </div>
+  <div class="panel-body" id="editorBody"><!-- filled by JS --></div>
+  <div class="panel-foot">
+    <button class="btn btn-ghost btn-sm" onclick="duplicatePost()">⧉ Duplicate</button>
+    <button class="btn btn-danger btn-sm" onclick="deletePost()">🗑 Delete</button>
+    <div style="flex:1"></div>
+    <span class="hint" id="saveHint">Autosaved</span>
+    <button class="btn btn-primary btn-sm" onclick="closeEditor()">Done</button>
+  </div>
+</div>
+
+<!-- ============ BRIEF MODAL ============ -->
+<div class="modal" id="briefModal">
+  <div class="panel-head">
+    <h2>✦ Generate Monthly Content Calendar</h2>
+    <button class="x" onclick="closeBrief()">✕</button>
+  </div>
+  <div class="panel-body">
+    <div id="briefError"></div>
+    <div class="card">
+      <div class="row">
+        <div class="form-field grow">
+          <label>Target month</label>
+          <input type="month" id="brMonth">
+        </div>
+        <div class="form-field grow">
+          <label>Cadence / total posts</label>
+          <input type="text" id="brCadence" placeholder="e.g. 3 posts/week or 12 posts">
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Platforms to cover</label>
+        <div class="multi" id="brPlatforms"></div>
+      </div>
+      <div class="form-field">
+        <label>Content pillars to draw from</label>
+        <div class="multi" id="brPillars"></div>
+      </div>
+      <div class="form-field">
+        <label>Audience</label>
+        <input type="text" id="brAudience" placeholder="e.g. pre-retirees, 50–65, in Malaysia">
+      </div>
+      <div class="form-field">
+        <label>Brand tone</label>
+        <input type="text" id="brTone" placeholder="e.g. trustworthy, plain-English, no jargon">
+      </div>
+      <div class="form-field">
+        <label>Campaign / theme focus <span class="hint">(optional)</span></label>
+        <input type="text" id="brCampaign" placeholder="e.g. Retirement readiness awareness month">
+      </div>
+      <div class="banner-warn">
+        Compliance guardrail is applied automatically: no specific return figures, guarantees, or personalized advice — claims stay general and educational.
+      </div>
+    </div>
+  </div>
+  <div class="panel-foot">
+    <div style="flex:1"></div>
+    <button class="btn btn-ghost btn-sm" onclick="closeBrief()">Cancel</button>
+    <button class="btn btn-accent" id="briefGenBtn" onclick="runGenerateCalendar()">Generate Calendar</button>
+  </div>
+</div>
+
+<!-- ============ MENU / SETTINGS + EXPORT MODAL ============ -->
+<div class="modal modal-mini" id="menuModal">
+  <div class="panel-head">
+    <h2>Menu</h2>
+    <button class="x" onclick="closeMenu()">✕</button>
+  </div>
+  <div class="panel-body">
+    <div class="card">
+      <h3>Data</h3>
+      <div class="row" style="gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
+        <button class="btn btn-ghost btn-sm" onclick="exportJSON()">⬇ Export JSON (backup)</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('importFile').click()">⬆ Import JSON</button>
+        <input type="file" id="importFile" accept="application/json" style="display:none" onchange="importJSON(event)">
+      </div>
+    </div>
+    <div class="card">
+      <h3>Settings</h3>
+      <div class="form-field">
+        <label>OpenAI API key <span class="hint">(powers all text + image stages; stored locally in your browser)</span></label>
+        <input type="password" id="setOpenaiKey" placeholder="sk-… (stored locally)" onchange="saveOpenaiKey(this.value)">
+      </div>
+      <div class="form-field">
+        <label>OpenAI proxy URL <span class="hint">(optional — if set, calls route here and the key is injected server-side; leave the key blank)</span></label>
+        <input type="text" id="setProxy" placeholder="https://your-worker.workers.dev" onchange="settings.proxyBase=this.value.trim();persist();toast('Proxy URL saved')">
+      </div>
+      <div class="form-field">
+        <label>Proxy access token <span class="hint">(the shared team password for the proxy — required only if your proxy sets one)</span></label>
+        <input type="password" id="setProxyToken" placeholder="team password (stored locally)" onchange="saveProxyToken(this.value)">
+      </div>
+      <div class="form-field">
+        <label>Default brand tone</label>
+        <input type="text" id="setTone" onchange="settings.defaultTone=this.value;persist()">
+      </div>
+      <div class="form-field">
+        <label>Platforms</label>
+        <div class="tag-editor" id="setPlatforms"></div>
+      </div>
+      <div class="form-field">
+        <label>Content pillars</label>
+        <div class="tag-editor" id="setPillars"></div>
+      </div>
+      <div class="form-field">
+        <label>Owners</label>
+        <div class="tag-editor" id="setOwners"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Danger zone</h3>
+      <button class="btn btn-danger btn-sm" onclick="clearAll()">Delete all posts</button>
+    </div>
+  </div>
+  <div class="panel-foot">
+    <div style="flex:1"></div>
+    <button class="btn btn-primary btn-sm" onclick="closeMenu()">Close</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================================
+   STATE + PERSISTENCE
+   ========================================================================== */
+const LS_POSTS='cs_posts_v1', LS_SETTINGS='cs_settings_v1', LS_OPENAI='cs_openai_key_v1', LS_PROXY_TOKEN='cs_proxy_token_v1';
+const STATUSES=['Idea','Draft','In Review','Approved','Scheduled','Posted'];
+const STATUS_COLOR={
+  'Idea':'var(--s-idea)','Draft':'var(--s-draft)','In Review':'var(--s-review)',
+  'Approved':'var(--s-approved)','Scheduled':'var(--s-scheduled)','Posted':'var(--s-posted)'
+};
+const CHAR_LIMITS={'LinkedIn':3000,'X/Twitter':280,'Instagram':2200,'Facebook':63206,'YouTube':5000,'Blog':100000};
+// TEXT stages (Calendar, Draft, Create, Video Script) use OpenAI Chat Completions.
+// Endpoint: https://api.openai.com/v1/chat/completions — note GPT-5 models use
+// "max_completion_tokens" (not "max_tokens"). Swap TXT_MODEL to 'gpt-5.4-mini' for lower cost.
+const TXT_MODEL='gpt-5.4-mini', MAX_TOKENS=2000;
+// IMAGE stage (OpenAI). generations endpoint, or edits endpoint when a reference image is set.
+// Response is base64 PNG in data[0].b64_json.
+const IMG_MODEL='gpt-image-2';
+
+// One OpenAI key powers both text and image stages.
+let posts=[], settings={}, openaiKey='', proxyToken='';
+let currentMonth, viewMode='calendar', searchTerm='';
+let editingId=null, activeStage='draft';
+let listSort={key:'date',dir:1};
+
+const DEFAULT_SETTINGS={
+  platforms:['LinkedIn','Facebook','Instagram','X/Twitter','YouTube','Blog'],
+  pillars:['Retirement Reality','1-Minute Finance','Did You Know?','Advisor FAQ','Education','Awareness','Engagement','Case Study','Electronic Direct Mail (EDM)'],
+  owners:['Unassigned'],
+  defaultTone:'trustworthy, plain-English, no jargon',
+  proxyBase:'' // optional: URL of a server-side proxy that injects the OpenAI key (keeps it off the client)
+};
+
+function load(){
+  try{posts=JSON.parse(localStorage.getItem(LS_POSTS))||[];}catch(e){posts=[];}
+  try{settings=JSON.parse(localStorage.getItem(LS_SETTINGS))||null;}catch(e){settings=null;}
+  if(!settings) settings=JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+  // backfill any missing settings keys
+  for(const k in DEFAULT_SETTINGS) if(settings[k]===undefined) settings[k]=DEFAULT_SETTINGS[k];
+  // one-time migration: adopt the canonical content-pillar set on existing installs
+  if(settings.pillarsRev!==2){
+    settings.pillars=DEFAULT_SETTINGS.pillars.slice();
+    settings.pillarsRev=2;
+    localStorage.setItem(LS_SETTINGS,JSON.stringify(settings));
+  }
+  openaiKey=localStorage.getItem(LS_OPENAI)||'';
+  proxyToken=localStorage.getItem(LS_PROXY_TOKEN)||'';
+}
+function persist(){
+  // setItem is atomic per key: a failed write leaves the previous good value intact,
+  // so a too-large image can't corrupt existing data — we just warn (no silent loss).
+  try{
+    localStorage.setItem(LS_POSTS,JSON.stringify(posts));
+    localStorage.setItem(LS_SETTINGS,JSON.stringify(settings));
+    return true;
+  }catch(e){
+    toast('Storage full — likely a generated image is too large to save. It stays for this session; export a JSON backup to keep it.',true);
+    return false;
+  }
+}
+function saveOpenaiKey(v){openaiKey=v.trim();localStorage.setItem(LS_OPENAI,openaiKey);toast('OpenAI key saved locally');}
+function saveProxyToken(v){proxyToken=v.trim();localStorage.setItem(LS_PROXY_TOKEN,proxyToken);toast('Access token saved locally');}
+
+function uid(){return 'p'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4);}
+function nowISO(){return new Date().toISOString();}
+
+/* ============================================================================
+   HELPERS
+   ========================================================================== */
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function pad(n){return String(n).padStart(2,'0');}
+function ymd(d){return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());}
+function monthName(d){return d.toLocaleDateString('en-US',{month:'long',year:'numeric'});}
+function parseYMD(s){const[y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd);}
+
+function newPostTemplate(date){
+  return {
+    id:uid(), title:'Untitled post', date:date||ymd(currentMonth||new Date()), time:'09:00',
+    platforms:[], pillar:settings.pillars[0]||'', concept:'', caption:'',
+    hashtags:'', cta:'', link:'', mediaNote:'', image:'', refImage:'', imagePrompt:'', imageMeta:'', isVideo:false, videoScript:'',
+    status:'Idea', complianceNote:'', owner:settings.owners[0]||'Unassigned',
+    createdAt:nowISO(), updatedAt:nowISO()
+  };
+}
+
+function toast(msg,isErr){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className='toast show'+(isErr?' err':'');
+  clearTimeout(t._to); t._to=setTimeout(()=>t.className='toast',2600);
+}
+
+/* ============================================================================
+   FILTERING
+   ========================================================================== */
+function getFilters(){
+  return {
+    platform:document.getElementById('fltPlatform').value,
+    pillar:document.getElementById('fltPillar').value,
+    status:document.getElementById('fltStatus').value,
+    from:document.getElementById('fltFrom').value,
+    to:document.getElementById('fltTo').value
+  };
+}
+function passesFilters(p){
+  const f=getFilters();
+  if(f.platform && !(p.platforms||[]).includes(f.platform)) return false;
+  if(f.pillar && p.pillar!==f.pillar) return false;
+  if(f.status && p.status!==f.status) return false;
+  if(f.from && p.date<f.from) return false;
+  if(f.to && p.date>f.to) return false;
+  if(searchTerm){
+    const hay=(p.title+' '+p.concept+' '+p.caption+' '+(p.platforms||[]).join(' ')+' '+p.pillar+' '+p.owner+' '+p.hashtags).toLowerCase();
+    if(!hay.includes(searchTerm.toLowerCase())) return false;
+  }
+  return true;
+}
+function clearFilters(){
+  ['fltPlatform','fltPillar','fltStatus','fltFrom','fltTo'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('searchInput').value=''; searchTerm=''; render();
+}
+function onSearch(v){searchTerm=v;render();}
+
+/* ============================================================================
+   RENDER — top-level
+   ========================================================================== */
+function render(){
+  document.getElementById('monthLabel').textContent=monthName(currentMonth);
+  document.getElementById('printTitle').textContent='Content Calendar — '+monthName(currentMonth);
+  renderStats();
+  if(viewMode==='calendar') renderCalendar(); else renderList();
+}
+
+function renderStats(){
+  const box=document.getElementById('statsBox');
+  const visible=posts.filter(passesFilters);
+  // per platform
+  const byPlat={}; const byStatus={};
+  visible.forEach(p=>{
+    (p.platforms||[]).forEach(pl=>byPlat[pl]=(byPlat[pl]||0)+1);
+    byStatus[p.status]=(byStatus[p.status]||0)+1;
+  });
+  const platMini=Object.entries(byPlat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<span class="chip-mini">${esc(k)} ${v}</span>`).join('')||'<span class="chip-mini">—</span>';
+  const statMini=STATUSES.filter(s=>byStatus[s]).map(s=>`<span class="chip-mini" style="color:${STATUS_COLOR[s]}">${s} ${byStatus[s]}</span>`).join('')||'<span class="chip-mini">—</span>';
+  box.innerHTML=`
+    <div class="stat-card"><div class="n">${visible.length}</div><div class="l">Posts shown</div></div>
+    <div class="stat-card"><div class="l">By platform</div><div class="stat-mini">${platMini}</div></div>
+    <div class="stat-card"><div class="l">By status</div><div class="stat-mini">${statMini}</div></div>
+  `;
+}
+
+/* ---------- Calendar view ---------- */
+function renderCalendar(){
+  const head=document.getElementById('calHead');
+  head.innerHTML=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<div>${d}</div>`).join('');
+  const grid=document.getElementById('calGrid');
+  const year=currentMonth.getFullYear(), month=currentMonth.getMonth();
+  const first=new Date(year,month,1);
+  const startDow=first.getDay();
+  const start=new Date(year,month,1-startDow);
+  const todayStr=ymd(new Date());
+  let html='';
+  for(let i=0;i<42;i++){
+    const d=new Date(start); d.setDate(start.getDate()+i);
+    const ds=ymd(d);
+    const outside=d.getMonth()!==month;
+    const dayPosts=posts.filter(p=>p.date===ds && passesFilters(p))
+      .sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const chips=dayPosts.map(p=>{
+      const col=STATUS_COLOR[p.status]||'var(--s-idea)';
+      const plats=(p.platforms||[]).slice(0,2).join(', ')+((p.platforms||[]).length>2?'…':'');
+      // Sample visual: real generated image if present, else a "pending" tile once drafted.
+      const thumb=p.image
+        ? `<img class="chip-thumb" src="${p.image}" alt="">`
+        : ((p.caption||'').trim() ? `<div class="chip-thumb ph" title="Visual pending — generate in the Image stage">🖼</div>` : '');
+      return `<div class="post-chip" style="border-left-color:${col}" onclick="event.stopPropagation();openEditor('${p.id}')" title="${esc(p.title)}">
+        ${thumb}
+        <div class="pt">${p.isVideo?'<span class="vid-tag">VID</span> ':''}${esc(p.title)}</div>
+        <div class="pm">${esc(plats||'—')}</div>
+      </div>`;
+    }).join('');
+    html+=`<div class="cal-cell ${outside?'out':''} ${ds===todayStr?'today':''}" ondblclick="quickAdd('${ds}')">
+      <div class="daynum"><span>${d.getDate()}</span><button class="add" title="Quick add" onclick="event.stopPropagation();quickAdd('${ds}')">+</button></div>
+      ${chips}
+    </div>`;
+  }
+  grid.innerHTML=html;
+  // stop overflow: nothing to hide, cells expand
+}
+function quickAdd(ds){openEditor(null,ds);}
+
+/* ---------- List view ---------- */
+function sortList(key){
+  if(listSort.key===key) listSort.dir*=-1; else {listSort.key=key;listSort.dir=1;}
+  renderList();
+}
+function renderList(){
+  const body=document.getElementById('listBody');
+  let rows=posts.filter(passesFilters);
+  const k=listSort.key, dir=listSort.dir;
+  rows.sort((a,b)=>{
+    let va=a[k],vb=b[k];
+    if(k==='platforms'){va=(a.platforms||[]).join(',');vb=(b.platforms||[]).join(',');}
+    va=(va==null?'':va).toString().toLowerCase(); vb=(vb==null?'':vb).toString().toLowerCase();
+    return va<vb?-dir:va>vb?dir:0;
+  });
+  document.getElementById('listEmpty').style.display=rows.length?'none':'block';
+  body.innerHTML=rows.map(p=>{
+    const col=STATUS_COLOR[p.status];
+    // Sample visual: real image if present, pending tile once drafted, faint tile otherwise.
+    const thumb=p.image
+      ? `<img class="list-thumb" src="${p.image}" alt="">`
+      : ((p.caption||'').trim() ? `<div class="list-thumb ph" title="Visual pending">🖼</div>` : `<div class="list-thumb none"></div>`);
+    return `<tr onclick="openEditor('${p.id}')">
+      <td>${esc(p.date)}<br><span class="hint">${esc(p.time||'')}</span></td>
+      <td><div style="display:flex;align-items:center;gap:10px">${thumb}<div><span class="ttl">${p.isVideo?'<span class="vid-tag">VID</span> ':''}${esc(p.title)}</span><br><span class="hint">${esc((p.concept||'').slice(0,60))}</span></div></div></td>
+      <td>${(p.platforms||[]).map(pl=>`<span class="pf">${esc(pl)}</span>`).join('')||'—'}</td>
+      <td>${esc(p.pillar||'—')}</td>
+      <td><span class="pill" style="color:${col};background:${col}1a"><span class="dot"></span>${esc(p.status)}</span></td>
+      <td>${esc(p.owner||'—')}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* ============================================================================
+   VIEW / MONTH NAV
+   ========================================================================== */
+function setView(v){
+  viewMode=v;
+  document.getElementById('viewCalBtn').classList.toggle('active',v==='calendar');
+  document.getElementById('viewListBtn').classList.toggle('active',v==='list');
+  document.getElementById('calendarView').style.display=v==='calendar'?'block':'none';
+  document.getElementById('listView').style.display=v==='list'?'block':'none';
+  render();
+}
+function shiftMonth(n){currentMonth=new Date(currentMonth.getFullYear(),currentMonth.getMonth()+n,1);render();}
+function goToday(){const t=new Date();currentMonth=new Date(t.getFullYear(),t.getMonth(),1);render();}
+
+/* ============================================================================
+   POST EDITOR
+   ========================================================================== */
+function findPost(id){return posts.find(p=>p.id===id);}
+
+function openEditor(id,forceDate){
+  let p;
+  if(id){p=findPost(id);}
+  else{p=newPostTemplate(forceDate);posts.push(p);persist();}
+  editingId=p.id;
+  activeStage='draft';
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('editorPanel').classList.add('show');
+  renderEditor();
+}
+function closeEditor(){
+  editingId=null;
+  document.getElementById('editorPanel').classList.remove('show');
+  hideOverlayIfClean();
+  render();
+}
+function hideOverlayIfClean(){
+  const anyOpen=document.getElementById('editorPanel').classList.contains('show')
+    ||document.getElementById('briefModal').classList.contains('show')
+    ||document.getElementById('menuModal').classList.contains('show');
+  if(!anyOpen) document.getElementById('overlay').classList.remove('show');
+}
+function onOverlayClick(e){
+  // Close whichever is open (click outside)
+  if(document.getElementById('briefModal').classList.contains('show')){closeBrief();return;}
+  if(document.getElementById('menuModal').classList.contains('show')){closeMenu();return;}
+  if(document.getElementById('editorPanel').classList.contains('show')){closeEditor();return;}
+}
+
+function update(field,val){
+  const p=findPost(editingId); if(!p) return;
+  p[field]=val; p.updatedAt=nowISO(); persist();
+  flashSaved();
+  // light refresh of dependent UI
+  if(field==='status'||field==='isVideo'||field==='complianceNote') renderEditor();
+  else{updateStatusPill();}
+}
+function flashSaved(){
+  const h=document.getElementById('saveHint');
+  h.textContent='Saving…'; clearTimeout(h._t);
+  h._t=setTimeout(()=>h.textContent='Autosaved ✓',250);
+}
+function updateStatusPill(){
+  const p=findPost(editingId); if(!p) return;
+  const col=STATUS_COLOR[p.status];
+  document.getElementById('editorStatusPill').style.color=col;
+  document.getElementById('editorStatusPill').style.background=col+'22';
+  document.getElementById('editorStatusPill').innerHTML=`<span class="dot"></span>${esc(p.status)}`;
+}
+
+/* status change with enforcement rules */
+function changeStatus(val){
+  const p=findPost(editingId); if(!p) return;
+  if((val==='Scheduled'||val==='Posted') && !['Approved','Scheduled','Posted'].includes(p.status) && p.status!=='Approved'){
+    // must be Approved first
+    if(p.status!=='Approved'){
+      toast('Only Approved posts can be Scheduled or Posted.',true);
+      renderEditor(); return;
+    }
+  }
+  if(val==='Scheduled'||val==='Posted'){
+    if(p.status!=='Approved' && p.status!=='Scheduled' && p.status!=='Posted'){
+      toast('Move the post to Approved first.',true); renderEditor(); return;
+    }
+  }
+  if(val==='Approved' && !(p.complianceNote||'').trim()){
+    toast('Add a compliance note before approving (even “N/A — evergreen educational”).',true);
+    renderEditor(); return;
+  }
+  p.status=val; p.updatedAt=nowISO(); persist(); flashSaved(); renderEditor();
+}
+
+function setStage(s){
+  const p=findPost(editingId); if(!p) return;
+  if(s==='video' && !p.isVideo){toast('Flag this post as video to unlock the script stage.',true);return;}
+  activeStage=s; renderEditor();
+}
+
+function renderEditor(){
+  const p=findPost(editingId); if(!p) return;
+  document.getElementById('editorTitle').textContent=p.title||'Untitled post';
+  updateStatusPill();
+
+  const platOpts=settings.platforms.map(pl=>{
+    const on=(p.platforms||[]).includes(pl);
+    return `<label class="${on?'on':''}"><input type="checkbox" ${on?'checked':''} onchange="togglePlatform('${esc(pl)}')">${esc(pl)}</label>`;
+  }).join('');
+  const pillarOpts=settings.pillars.map(pl=>`<option ${p.pillar===pl?'selected':''}>${esc(pl)}</option>`).join('');
+  const ownerOpts=settings.owners.map(o=>`<option ${p.owner===o?'selected':''}>${esc(o)}</option>`).join('');
+  const statusOpts=STATUSES.map(s=>`<option ${p.status===s?'selected':''}>${esc(s)}</option>`).join('');
+
+  // stepper
+  const steps=[
+    {k:'draft',n:1,name:'Draft',sub:'Caption / body'},
+    {k:'create',n:2,name:'Create',sub:'Finalize content'},
+    {k:'image',n:3,name:'Image',sub:'Media visual'},
+    {k:'video',n:4,name:'Video Script',sub:p.isVideo?'Short-form':'Flag as video'}
+  ];
+  const stepper=steps.map(s=>{
+    const locked=(s.k==='video'&&!p.isVideo);
+    const done=(s.k==='draft'&&p.caption)||(s.k==='create'&&p.cta)||(s.k==='image'&&p.image)||(s.k==='video'&&p.videoScript);
+    return `<div class="step ${activeStage===s.k?'active':''} ${done?'done':''} ${locked?'locked':''}" onclick="setStage('${s.k}')">
+      <div class="s-num">${done?'✓':s.n}</div>
+      <div class="s-name">${s.name}</div>
+      <div class="s-sub">${s.sub}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('editorBody').innerHTML=`
+    <!-- CORE FIELDS -->
+    <div class="card">
+      <h3>📋 Post details</h3>
+      <div class="form-field">
+        <label>Title (internal label)</label>
+        <input id="f_title" value="${esc(p.title)}" oninput="update('title',this.value)">
+      </div>
+      <div class="row">
+        <div class="form-field grow">
+          <label>Date</label>
+          <input type="date" id="f_date" value="${esc(p.date)}" onchange="update('date',this.value)">
+        </div>
+        <div class="form-field grow">
+          <label>Time</label>
+          <input type="time" id="f_time" value="${esc(p.time||'')}" onchange="update('time',this.value)">
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Platforms</label>
+        <div class="multi">${platOpts}</div>
+      </div>
+      <div class="row">
+        <div class="form-field grow">
+          <label>Content pillar</label>
+          <select onchange="update('pillar',this.value)">${pillarOpts}</select>
+        </div>
+        <div class="form-field grow">
+          <label>Owner</label>
+          <select onchange="update('owner',this.value)">${ownerOpts}</select>
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Concept (one-line idea)</label>
+        <textarea style="min-height:52px" oninput="update('concept',this.value)">${esc(p.concept)}</textarea>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label><input type="checkbox" ${p.isVideo?'checked':''} onchange="update('isVideo',this.checked)"> This is a video post (unlocks Video Script stage)</label>
+      </div>
+    </div>
+
+    <!-- STAGE STEPPER -->
+    <div class="stepper">${stepper}</div>
+
+    <!-- STAGE CONTENT -->
+    <div id="stageContent">${renderStage(p)}</div>
+
+    <!-- WORKFLOW -->
+    <div class="card">
+      <h3>✔ Workflow &amp; compliance</h3>
+      <div class="row">
+        <div class="form-field grow">
+          <label>Status</label>
+          <select onchange="changeStatus(this.value)">${statusOpts}</select>
+          <span class="hint">Only Approved posts can move to Scheduled / Posted.</span>
+        </div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label>Compliance / disclaimer note <span class="hint">(required before Approved)</span></label>
+        <textarea style="min-height:52px" oninput="update('complianceNote',this.value)" placeholder="e.g. N/A — evergreen educational; or reviewed by compliance 2026-07-01">${esc(p.complianceNote)}</textarea>
+      </div>
+    </div>
+  `;
+}
+
+function togglePlatform(pl){
+  const p=findPost(editingId); if(!p) return;
+  p.platforms=p.platforms||[];
+  const i=p.platforms.indexOf(pl);
+  if(i>=0) p.platforms.splice(i,1); else p.platforms.push(pl);
+  p.updatedAt=nowISO(); persist(); flashSaved(); renderEditor();
+}
+
+/* ---------- Stage bodies ---------- */
+function renderStage(p){
+  if(activeStage==='draft') return stageDraft(p);
+  if(activeStage==='create') return stageCreate(p);
+  if(activeStage==='image') return imageCard(p);
+  if(activeStage==='video') return stageVideo(p);
+  return '';
+}
+
+function liveCount(id,text){
+  const el=document.getElementById(id); if(!el) return;
+  el.innerHTML=charCounter(text,findPost(editingId).platforms);
+}
+function charCounter(text,platforms){
+  const limits=(platforms||[]).map(pl=>CHAR_LIMITS[pl]).filter(Boolean);
+  const len=(text||'').length;
+  if(!limits.length) return `<div class="charcount">${len} chars</div>`;
+  const min=Math.min(...limits);
+  const over=len>min;
+  const which=(platforms||[]).filter(pl=>CHAR_LIMITS[pl]&&len>CHAR_LIMITS[pl]);
+  return `<div class="charcount ${over?'warn':''}">${len} chars${over?' — over limit for '+which.join(', ')+' (warning only)':''}</div>`;
+}
+
+function stageDraft(p){
+  return `
+    <div class="card" id="genState_draft">
+      <div class="gen-bar">
+        <h3 style="margin:0">✍ Stage 2 — Post Draft</h3>
+        <button class="btn btn-accent btn-sm" onclick="generate('draft')">✦ ${p.caption?'Regenerate':'Generate'} draft</button>
+      </div>
+      <div class="desc" style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Generates a first-draft caption/body from the concept, platform(s), and tone. Your edits are never overwritten unless you click Regenerate.</div>
+      <div id="genMsg_draft"></div>
+      <div class="form-field" style="margin-bottom:4px">
+        <label>Caption / body</label>
+        <textarea style="min-height:150px" oninput="update('caption',this.value);liveCount('cc_draft',this.value)">${esc(p.caption)}</textarea>
+      </div>
+      <div id="cc_draft">${charCounter(p.caption,p.platforms)}</div>
+    </div>`;
+}
+
+function stageCreate(p){
+  return `
+    <div class="card" id="genState_create">
+      <div class="gen-bar">
+        <h3 style="margin:0">🎯 Stage 3 — Finalize (Create)</h3>
+        <button class="btn btn-accent btn-sm" onclick="generate('create')">✦ ${p.cta?'Regenerate':'Generate'} final</button>
+      </div>
+      <div class="desc" style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Refines the draft into polished caption, hashtags, CTA, link placeholder and media direction.</div>
+      <div id="genMsg_create"></div>
+      <div class="form-field">
+        <label>Polished caption</label>
+        <textarea style="min-height:120px" oninput="update('caption',this.value);liveCount('cc_create',this.value)">${esc(p.caption)}</textarea>
+        <div id="cc_create">${charCounter(p.caption,p.platforms)}</div>
+      </div>
+      <div class="form-field">
+        <label>Hashtags</label>
+        <input value="${esc(p.hashtags)}" oninput="update('hashtags',this.value)" placeholder="#RetirementReady #FinancialLiteracy">
+      </div>
+      <div class="row">
+        <div class="form-field grow">
+          <label>Call to action</label>
+          <input value="${esc(p.cta)}" oninput="update('cta',this.value)" placeholder="e.g. Book a no-obligation review">
+        </div>
+        <div class="form-field grow">
+          <label>Link</label>
+          <input value="${esc(p.link)}" oninput="update('link',this.value)" placeholder="[link placeholder]">
+        </div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label>Media note / direction</label>
+        <textarea style="min-height:60px" oninput="update('mediaNote',this.value)" placeholder="e.g. Warm photo of couple reviewing documents; brand navy overlay">${esc(p.mediaNote)}</textarea>
+      </div>
+    </div>`;
+}
+
+function imageCard(p){
+  const prompt=p.imagePrompt||p.mediaNote||p.concept||p.title||'';
+  const sizes=['1024x1024','1536x1024','1024x1536'];
+  const quals=['high','medium','low','auto'];
+  const sizeOpts=sizes.map(s=>`<option ${p.imageSize===s?'selected':''}>${s}</option>`).join('');
+  const qualOpts=quals.map(q=>`<option ${(p.imageQuality||'high')===q?'selected':''}>${q}</option>`).join('');
+  return `
+    <div class="card">
+      <div class="gen-bar">
+        <h3 style="margin:0">🖼 Media image <span class="hint" style="text-transform:none;letter-spacing:0">— OpenAI ${IMG_MODEL}</span></h3>
+        <button class="btn btn-accent btn-sm" onclick="generateImage()">✦ ${p.image?'Regenerate':'Generate'} image</button>
+      </div>
+      <div class="desc" style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Generates a visual from the prompt below (defaults to your media note). Requires an OpenAI key in Settings. Large images may exceed browser storage — export a JSON backup to keep them.</div>
+      <div id="genMsg_image"></div>
+      <div class="form-field">
+        <label>Image prompt</label>
+        <textarea style="min-height:60px" oninput="update('imagePrompt',this.value)" placeholder="Describe the image…">${esc(prompt)}</textarea>
+      </div>
+      <div class="form-field">
+        <label>Reference image <span class="hint">(optional — enables image-to-image)</span></label>
+        ${p.refImage?`
+          <div class="row" style="align-items:center;gap:12px">
+            <img src="${p.refImage}" alt="Reference" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+            <div>
+              <div class="hint">${IMG_MODEL} will use this as a visual reference.</div>
+              <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="removeRefImage()">✕ Remove reference</button>
+            </div>
+          </div>`:`
+          <input type="file" accept="image/*" onchange="uploadRefImage(event)">
+          <span class="hint">Upload a photo/graphic to guide the result. Downscaled to 1024px on upload.</span>`}
+      </div>
+      <div class="row">
+        <div class="form-field grow">
+          <label>Size</label>
+          <select onchange="update('imageSize',this.value)">${sizeOpts}</select>
+        </div>
+        <div class="form-field grow">
+          <label>Quality</label>
+          <select onchange="update('imageQuality',this.value)">${qualOpts}</select>
+        </div>
+      </div>
+      ${p.image?`
+      <div style="margin-top:4px">
+        <img src="${p.image}" alt="Generated media" style="width:100%;border-radius:8px;border:1px solid var(--line);display:block">
+        <div class="hint" style="margin-top:6px">${esc(p.imageMeta||'')}</div>
+        <div class="row" style="gap:8px;margin-top:8px">
+          <button class="btn btn-ghost btn-sm" onclick="downloadImage()">⬇ Download PNG</button>
+          <button class="btn btn-ghost btn-sm" onclick="removeImage()">✕ Remove</button>
+        </div>
+      </div>`:`<div class="hint">No image yet.</div>`}
+    </div>`;
+}
+
+function stageVideo(p){
+  return `
+    <div class="card" id="genState_video">
+      <div class="gen-bar">
+        <h3 style="margin:0">🎬 Stage 4 — Video Script</h3>
+        <button class="btn btn-accent btn-sm" onclick="generate('video')">✦ ${p.videoScript?'Regenerate':'Generate'} script</button>
+      </div>
+      <div class="desc" style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Short-form script: hook, scene/shot breakdown, on-screen text + voiceover, CTA, suggested runtime, and companion caption.</div>
+      <div id="genMsg_video"></div>
+      <div class="form-field" style="margin-bottom:0">
+        <label>Video script</label>
+        <textarea style="min-height:280px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px" oninput="update('videoScript',this.value)" placeholder="Click Generate to draft a short-form script…">${esc(p.videoScript)}</textarea>
+      </div>
+    </div>`;
+}
+
+/* ============================================================================
+   AI GENERATION — Anthropic Messages API
+   ========================================================================== */
+// Route calls direct to OpenAI (client key) or through a server-side proxy that injects the key.
+function apiCfg(){
+  const base=((settings.proxyBase||'').trim()).replace(/\/+$/,'');
+  return base ? {base, proxy:true, token:(proxyToken||'').trim()} : {base:'https://api.openai.com', proxy:false, token:''};
+}
+async function callText(system, userContent, maxTokens){
+  const {base,proxy,token}=apiCfg();
+  if(!proxy && !openaiKey) throw new Error('Add your OpenAI API key (or a proxy URL) in Settings (⋯ menu) to generate content.');
+  const headers={'content-type':'application/json'};
+  if(!proxy) headers['authorization']='Bearer '+openaiKey; // proxy injects auth server-side
+  if(proxy && token) headers['x-access-token']=token;      // shared access password
+  const res=await fetch(base+'/v1/chat/completions',{
+    method:'POST',
+    headers,
+    body:JSON.stringify({
+      model:TXT_MODEL,
+      max_completion_tokens:maxTokens||MAX_TOKENS,
+      messages:[{role:'system',content:system},{role:'user',content:userContent}]
+    })
+  });
+  if(!res.ok){
+    let detail='';
+    try{detail=JSON.stringify(await res.json());}catch(e){detail=await res.text();}
+    throw new Error('API '+res.status+': '+detail);
+  }
+  const data=await res.json();
+  const msg=data&&data.choices&&data.choices[0]&&data.choices[0].message;
+  return ((msg&&msg.content)||'').trim();
+}
+
+const GUARDRAIL='COMPLIANCE (regulated financial advisory): Never state specific return figures, performance numbers, or guarantees. Never give personalized investment advice. Keep all claims general, educational, and compliant. Prefer plain English, no jargon.';
+
+/* Per-post single-flight lock so generations run one at a time per post */
+const genLock={};
+function retryGen(stage){ if(stage==='image') generateImage(); else generate(stage); }
+
+function showGenLoading(stage,on){
+  const el=document.getElementById('genMsg_'+stage); if(!el) return;
+  el.innerHTML=on?`<div class="loading"><div class="spinner"></div> Generating… this runs one call at a time.</div>`:'';
+}
+function showGenError(stage,msg,raw){
+  const el=document.getElementById('genMsg_'+stage); if(!el) return;
+  el.innerHTML=`<div class="errbox">⚠ Generation failed. Your existing content is untouched.
+    <div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="retryGen('${stage}')">Retry</button></div>
+    ${raw?`<div class="raw">${esc(raw)}</div>`:''}
+    <div style="margin-top:6px;font-size:11px">${esc(msg)}</div></div>`;
+}
+
+async function generate(stage){
+  const p=findPost(editingId); if(!p) return;
+  if(genLock[p.id]){toast('A generation is already running for this post.',true);return;}
+  if(stage==='draft'||stage==='create'){
+    if(!(p.platforms||[]).length){toast('Pick at least one platform first.',true);return;}
+  }
+  genLock[p.id]=true;
+  showGenError(stage,'',''); showGenLoading(stage,true);
+
+  const tone=settings.defaultTone||'trustworthy, plain-English';
+  try{
+    if(stage==='draft'){
+      const sys=`You write social media copy for a small financial advisory firm. Brand tone: ${tone}. ${GUARDRAIL}\nReturn ONLY the caption/body text — no preamble, no options, no markdown headers.`;
+      const usr=`Write a first-draft ${p.platforms.join(' / ')} post.\nPillar: ${p.pillar}\nConcept: ${p.concept||p.title}\nTitle: ${p.title}\nKeep length appropriate to the platform(s).`;
+      const out=await callText(sys,usr);
+      p.caption=out;
+    }
+    else if(stage==='create'){
+      const sys=`You finalize social media posts for a financial advisory firm. Brand tone: ${tone}. ${GUARDRAIL}
+Return the result in EXACTLY these labeled sections, plain text, no markdown fences:
+CAPTION: <polished caption/body>
+HASHTAGS: <space-separated hashtags>
+CTA: <one call to action>
+LINK: <a link placeholder like [Book a call →]>
+MEDIA: <one line of visual/media direction>`;
+      const usr=`Finalize this post for ${p.platforms.join(' / ')}.\nPillar: ${p.pillar}\nConcept: ${p.concept}\nCurrent draft:\n${p.caption||'(none yet — write from concept)'}`;
+      const out=await callText(sys,usr);
+      applyCreateOutput(p,out);
+    }
+    else if(stage==='video'){
+      const sys=`You write short-form video scripts (Reels / Shorts / TikTok-style) for a financial advisory firm. Brand tone: ${tone}. ${GUARDRAIL}
+Return a plain-text script with clearly labeled sections: HOOK, SCENES / SHOT BREAKDOWN (numbered), ON-SCREEN TEXT + VOICEOVER, CTA, SUGGESTED RUNTIME, COMPANION CAPTION.`;
+      const usr=`Write a short-form video script.\nTitle: ${p.title}\nPillar: ${p.pillar}\nConcept: ${p.concept}\nExisting caption for reference:\n${p.caption||'(none)'}`;
+      const out=await callText(sys,usr);
+      p.videoScript=out;
+    }
+    p.updatedAt=nowISO(); persist();
+    showGenLoading(stage,false);
+    renderEditor(); setStage(stage);
+    toast('Generated ✓');
+  }catch(err){
+    showGenLoading(stage,false);
+    showGenError(stage,err.message||String(err),'');
+  }finally{
+    genLock[p.id]=false;
+  }
+}
+
+function applyCreateOutput(p,out){
+  // Parse labeled sections; fall back to dumping into caption on failure.
+  try{
+    const grab=(label,next)=>{
+      const re=new RegExp(label+'\\s*:?\\s*([\\s\\S]*?)(?=\\n(?:'+next+')\\s*:|$)','i');
+      const m=out.match(re); return m?m[1].trim():null;
+    };
+    const labels='CAPTION|HASHTAGS|CTA|LINK|MEDIA';
+    const cap=grab('CAPTION',labels), tags=grab('HASHTAGS',labels), cta=grab('CTA',labels),
+          link=grab('LINK',labels), media=grab('MEDIA',labels);
+    if(cap!==null||cta!==null||tags!==null){
+      if(cap!==null) p.caption=cap;
+      if(tags!==null) p.hashtags=tags;
+      if(cta!==null) p.cta=cta;
+      if(link!==null) p.link=link;
+      if(media!==null) p.mediaNote=media;
+    }else{
+      // no labels found — keep everything, put raw text in caption
+      p.caption=out;
+    }
+  }catch(e){
+    p.caption=out; // never lose the text
+  }
+}
+
+/* ---------- Image generation (OpenAI gpt-image-2) ---------- */
+async function generateImage(){
+  const p=findPost(editingId); if(!p) return;
+  const {base,proxy,token}=apiCfg();
+  if(!proxy && !openaiKey){toast('Add your OpenAI API key (or a proxy URL) in Settings (⋯ menu) to generate images.',true);return;}
+  if(genLock[p.id]){toast('A generation is already running for this post.',true);return;}
+  const prompt=(p.imagePrompt||p.mediaNote||p.concept||p.title||'').trim();
+  if(!prompt){toast('Add an image prompt or media note first.',true);return;}
+  genLock[p.id]=true;
+  showGenError('image','',''); showGenLoading('image',true);
+  const size=p.imageSize||'1024x1024';
+  const quality=p.imageQuality||'high';
+  // Brand-consistent styling suffix for a calm, professional finance look.
+  const styled=prompt+'. Professional, calm, trustworthy finance-brand visual; clean composition; generous negative space; deep navy with subtle gold accents; no text, words, or logos.';
+  try{
+    let res;
+    if(p.refImage){
+      // Reference image present -> image-to-image via the edits endpoint (multipart/form-data).
+      const fd=new FormData();
+      fd.append('model',IMG_MODEL);
+      fd.append('image',dataURLtoBlob(p.refImage),'reference.png');
+      fd.append('prompt',styled);
+      fd.append('size',size);
+      fd.append('quality',quality);
+      fd.append('n','1');
+      // NOTE: don't set content-type — the browser adds the multipart boundary itself.
+      const eh=proxy?{}:{'authorization':'Bearer '+openaiKey};
+      if(proxy && token) eh['x-access-token']=token;
+      res=await fetch(base+'/v1/images/edits',{ method:'POST', headers:eh, body:fd });
+    }else{
+      const h={'content-type':'application/json'};
+      if(!proxy) h['authorization']='Bearer '+openaiKey;
+      if(proxy && token) h['x-access-token']=token;
+      res=await fetch(base+'/v1/images/generations',{
+        method:'POST', headers:h,
+        body:JSON.stringify({model:IMG_MODEL,prompt:styled,size,quality,n:1})
+      });
+    }
+    if(!res.ok){
+      let d=''; try{d=JSON.stringify(await res.json());}catch(e){d=await res.text();}
+      throw new Error('API '+res.status+': '+d);
+    }
+    const data=await res.json();
+    const b64=data&&data.data&&data.data[0]&&data.data[0].b64_json;
+    if(!b64) throw new Error('No image data returned by the API.');
+    p.image='data:image/png;base64,'+b64;
+    p.imagePrompt=prompt; p.imageSize=size; p.imageQuality=quality;
+    p.imageMeta=IMG_MODEL+' · '+size+' · '+quality+(p.refImage?' · image-to-image':'');
+    p.updatedAt=nowISO();
+    persist(); // may warn if the image is too large for localStorage; still shown this session
+    showGenLoading('image',false);
+    renderEditor(); setStage('image');
+    toast('Image generated ✓');
+  }catch(err){
+    showGenLoading('image',false);
+    showGenError('image',err.message||String(err),'');
+  }finally{
+    genLock[p.id]=false;
+  }
+}
+function dataURLtoBlob(dataURL){
+  const [meta,b64]=dataURL.split(',');
+  const mime=(meta.match(/:(.*?);/)||[])[1]||'image/png';
+  const bin=atob(b64), len=bin.length, arr=new Uint8Array(len);
+  for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr],{type:mime});
+}
+function uploadRefImage(ev){
+  const file=ev.target.files[0]; if(!file) return;
+  if(!file.type.startsWith('image/')){toast('Please choose an image file.',true);ev.target.value='';return;}
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const img=new Image();
+    img.onload=()=>{
+      const max=1024; let w=img.width, h=img.height;
+      if(w>max||h>max){const r=Math.min(max/w,max/h); w=Math.round(w*r); h=Math.round(h*r);}
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      const p=findPost(editingId); if(!p) return;
+      p.refImage=c.toDataURL('image/png'); p.updatedAt=nowISO();
+      persist(); renderEditor(); setStage('image');
+      toast('Reference image added');
+    };
+    img.onerror=()=>toast('Could not read that image.',true);
+    img.src=e.target.result;
+  };
+  reader.onerror=()=>toast('Could not read that file.',true);
+  reader.readAsDataURL(file);
+}
+function removeRefImage(){
+  const p=findPost(editingId); if(!p) return;
+  p.refImage=''; p.updatedAt=nowISO(); persist(); renderEditor(); setStage('image');
+}
+function downloadImage(){
+  const p=findPost(editingId); if(!p||!p.image) return;
+  const a=document.createElement('a'); a.href=p.image;
+  a.download=(p.title||'media').replace(/[^\w\-]+/g,'_').slice(0,40)+'.png'; a.click();
+}
+function removeImage(){
+  const p=findPost(editingId); if(!p) return;
+  if(!confirm('Remove this image?')) return;
+  p.image=''; p.imageMeta=''; p.updatedAt=nowISO(); persist(); renderEditor(); setStage('image');
+}
+
+/* ============================================================================
+   STAGE 1 — GENERATE CALENDAR
+   ========================================================================== */
+function openBrief(){
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('briefModal').classList.add('show');
+  document.getElementById('briefError').innerHTML='';
+  // defaults
+  document.getElementById('brMonth').value=currentMonth.getFullYear()+'-'+pad(currentMonth.getMonth()+1);
+  document.getElementById('brCadence').value=document.getElementById('brCadence').value||'3 posts/week';
+  document.getElementById('brTone').value=settings.defaultTone||'';
+  // platform + pillar chips
+  document.getElementById('brPlatforms').innerHTML=settings.platforms.map(pl=>
+    `<label class="on"><input type="checkbox" value="${esc(pl)}" checked onchange="this.parentNode.classList.toggle('on',this.checked)">${esc(pl)}</label>`).join('');
+  document.getElementById('brPillars').innerHTML=settings.pillars.map(pl=>
+    `<label class="on"><input type="checkbox" value="${esc(pl)}" checked onchange="this.parentNode.classList.toggle('on',this.checked)">${esc(pl)}</label>`).join('');
+}
+function closeBrief(){document.getElementById('briefModal').classList.remove('show');hideOverlayIfClean();}
+
+function checkedValues(containerId){
+  return [...document.querySelectorAll('#'+containerId+' input:checked')].map(i=>i.value);
+}
+
+async function runGenerateCalendar(){
+  const monthVal=document.getElementById('brMonth').value;
+  const cadence=document.getElementById('brCadence').value.trim();
+  const platforms=checkedValues('brPlatforms');
+  const pillars=checkedValues('brPillars');
+  const audience=document.getElementById('brAudience').value.trim();
+  const tone=document.getElementById('brTone').value.trim()||settings.defaultTone;
+  const campaign=document.getElementById('brCampaign').value.trim();
+  const errBox=document.getElementById('briefError');
+  errBox.innerHTML='';
+
+  if(!monthVal){errBox.innerHTML=`<div class="errbox">Please choose a target month.</div>`;return;}
+  if(!platforms.length){errBox.innerHTML=`<div class="errbox">Select at least one platform.</div>`;return;}
+  if(!pillars.length){errBox.innerHTML=`<div class="errbox">Select at least one pillar.</div>`;return;}
+
+  const [y,m]=monthVal.split('-').map(Number);
+  const daysInMonth=new Date(y,m,0).getDate();
+
+  const btn=document.getElementById('briefGenBtn');
+  btn.disabled=true; btn.textContent='Generating…';
+  errBox.innerHTML=`<div class="loading"><div class="spinner"></div> Generating a full month of ideas WITH ready-to-post copy in one call… this can take a bit longer.</div>`;
+
+  const sys=`You are a content strategist and copywriter for a small financial advisory firm. ${GUARDRAIL}
+You generate a monthly social content plan AND write the post copy for each entry.
+Return JSON ONLY — no prose, no markdown code fences. Output a single JSON array. Each element is an object with EXACTLY these keys:
+"date" (YYYY-MM-DD, within ${monthVal}, day 01-${pad(daysInMonth)}),
+"platform" (one of: ${platforms.join(', ')}),
+"pillar" (one of: ${pillars.join(', ')}),
+"title" (short internal label),
+"concept" (one-line post idea),
+"caption" (a complete, ready-to-post caption/body written for that platform in the brand tone — plain English, appropriate length for the platform, compliant with the rules above).
+Write real, usable copy in each "caption" (not a placeholder). Ensure the output is STRICTLY valid JSON: escape all newlines inside strings as \\n and escape any double quotes. Spread posts sensibly across the month following the cadence. Vary platforms and pillars.`;
+
+  const usr=`Target month: ${monthVal} (${daysInMonth} days)
+Cadence / total: ${cadence||'about 12 posts'}
+Platforms: ${platforms.join(', ')}
+Pillars: ${pillars.join(', ')}
+Audience: ${audience||'general prospective clients'}
+Brand tone: ${tone}
+Campaign focus: ${campaign||'none — general mix'}
+Return the JSON array now.`;
+
+  try{
+    const raw=await callText(sys,usr,8000); // whole-month JSON + full captions needs ample room
+    let arr=safeParseJSONArray(raw);
+    if(!Array.isArray(arr)) throw new Error('Model did not return a JSON array.');
+    let added=0;
+    arr.forEach(item=>{
+      if(!item||typeof item!=='object') return;
+      let date=(item.date||'').trim();
+      // sanitize date into the target month
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){
+        date=`${y}-${pad(m)}-${pad(Math.min(daysInMonth,Math.max(1,parseInt(date)||1)))}`;
+      }
+      let plat=item.platform&&platforms.includes(item.platform)?item.platform:platforms[0];
+      let pillar=item.pillar&&pillars.includes(item.pillar)?item.pillar:pillars[0];
+      const p=newPostTemplate(date);
+      p.title=(item.title||'Untitled').toString().slice(0,120);
+      p.concept=(item.concept||'').toString();
+      p.caption=(item.caption||'').toString();
+      p.platforms=[plat];
+      p.pillar=pillar;
+      p.status=p.caption.trim()?'Draft':'Idea'; // has copy -> Draft
+      posts.push(p); added++;
+    });
+    persist();
+    // jump to that month
+    currentMonth=new Date(y,m-1,1);
+    closeBrief();
+    render();
+    toast(`Added ${added} post${added===1?'':'s'} with drafts to ${monthName(currentMonth)} ✓`);
+  }catch(err){
+    errBox.innerHTML=`<div class="errbox">⚠ Could not generate the calendar. Nothing was changed.
+      <div style="margin-top:6px;font-size:11px">${esc(err.message||String(err))}</div>
+      ${err.raw?`<div class="raw">${esc(err.raw)}</div>`:''}
+      <div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="runGenerateCalendar()">Retry</button></div></div>`;
+  }finally{
+    btn.disabled=false; btn.textContent='Generate Calendar';
+  }
+}
+
+function safeParseJSONArray(text){
+  let t=(text||'').trim();
+  // strip markdown fences if present
+  t=t.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+  // grab the outermost array
+  const first=t.indexOf('['), last=t.lastIndexOf(']');
+  if(first>=0 && last>first) t=t.slice(first,last+1);
+  try{
+    return JSON.parse(t);
+  }catch(e){
+    const err=new Error('Response was not valid JSON. Raw output shown below so nothing is lost.');
+    err.raw=text; throw err;
+  }
+}
+
+/* ============================================================================
+   DUPLICATE / DELETE
+   ========================================================================== */
+function duplicatePost(){
+  const p=findPost(editingId); if(!p) return;
+  const copy=JSON.parse(JSON.stringify(p));
+  copy.id=uid(); copy.title=p.title+' (copy)'; copy.status='Idea';
+  copy.createdAt=nowISO(); copy.updatedAt=nowISO();
+  posts.push(copy); persist();
+  editingId=copy.id; renderEditor(); render();
+  toast('Post duplicated');
+}
+function deletePost(){
+  const p=findPost(editingId); if(!p) return;
+  if(!confirm(`Delete “${p.title}”? This cannot be undone.`)) return;
+  posts=posts.filter(x=>x.id!==editingId);
+  persist(); closeEditor();
+  toast('Post deleted');
+}
+
+/* ============================================================================
+   MENU / SETTINGS
+   ========================================================================== */
+function openMenu(){
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('menuModal').classList.add('show');
+  document.getElementById('setOpenaiKey').value=openaiKey;
+  document.getElementById('setProxy').value=settings.proxyBase||'';
+  document.getElementById('setProxyToken').value=proxyToken;
+  document.getElementById('setTone').value=settings.defaultTone||'';
+  renderTagEditors();
+}
+function closeMenu(){document.getElementById('menuModal').classList.remove('show');hideOverlayIfClean();rebuildFilterOptions();render();}
+
+function renderTagEditors(){
+  const mk=(listKey,containerId)=>{
+    const el=document.getElementById(containerId);
+    el.innerHTML=settings[listKey].map((t,i)=>
+      `<span class="tg">${esc(t)} <button onclick="removeTag('${listKey}',${i})">✕</button></span>`).join('')
+      +`<input placeholder="+ add" onkeydown="if(event.key==='Enter'){addTag('${listKey}',this.value);this.value='';}">`;
+  };
+  mk('platforms','setPlatforms');
+  mk('pillars','setPillars');
+  mk('owners','setOwners');
+}
+function addTag(key,val){
+  val=(val||'').trim(); if(!val) return;
+  if(settings[key].includes(val)){toast('Already exists',true);return;}
+  settings[key].push(val); persist(); renderTagEditors();
+}
+function removeTag(key,i){
+  if(settings[key].length<=1){toast('Keep at least one',true);return;}
+  settings[key].splice(i,1); persist(); renderTagEditors();
+}
+
+/* ============================================================================
+   EXPORT / IMPORT
+   ========================================================================== */
+function download(filename,content,type){
+  const blob=new Blob([content],{type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function exportJSON(){
+  const payload={version:1, exportedAt:nowISO(), settings, posts};
+  download('content-studio-backup-'+ymd(new Date())+'.json',JSON.stringify(payload,null,2),'application/json');
+  toast('JSON backup exported');
+}
+function exportCSV(){
+  const cols=['date','time','title','platforms','pillar','status','owner','concept','caption','hashtags','cta','link','mediaNote','isVideo','videoScript','complianceNote'];
+  const escCSV=v=>{
+    v=(v==null?'':Array.isArray(v)?v.join(' | '):String(v));
+    return '"'+v.replace(/"/g,'""')+'"';
+  };
+  const rows=[cols.join(',')];
+  posts.slice().sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).forEach(p=>{
+    rows.push(cols.map(c=>escCSV(p[c])).join(','));
+  });
+  download('content-studio-'+ymd(new Date())+'.csv',rows.join('\r\n'),'text/csv');
+  toast('CSV exported');
+}
+function importJSON(ev){
+  const file=ev.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const data=JSON.parse(e.target.result);
+      const incoming=Array.isArray(data)?data:data.posts;
+      if(!Array.isArray(incoming)) throw new Error('No posts array found in file.');
+      if(!confirm(`Import ${incoming.length} posts? This will REPLACE your current ${posts.length} posts.`)) {ev.target.value='';return;}
+      posts=incoming.map(p=>({...newPostTemplate(p.date),...p, id:p.id||uid()}));
+      if(data.settings){ for(const k in DEFAULT_SETTINGS) if(data.settings[k]!==undefined) settings[k]=data.settings[k]; }
+      persist(); rebuildFilterOptions(); render();
+      toast('Imported '+posts.length+' posts ✓');
+    }catch(err){
+      toast('Import failed: '+err.message,true);
+    }
+    ev.target.value='';
+  };
+  reader.readAsText(file);
+}
+function clearAll(){
+  if(!confirm('Delete ALL posts? This cannot be undone. (Export a backup first.)')) return;
+  if(!confirm('Are you absolutely sure? Everything will be erased.')) return;
+  posts=[]; persist(); closeMenu(); render(); toast('All posts deleted');
+}
+
+/* ============================================================================
+   FILTER OPTION LISTS
+   ========================================================================== */
+function rebuildFilterOptions(){
+  const fill=(id,list,keepAll)=>{
+    const sel=document.getElementById(id); const cur=sel.value;
+    sel.innerHTML='<option value="">All</option>'+list.map(x=>`<option>${esc(x)}</option>`).join('');
+    if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+  };
+  fill('fltPlatform',settings.platforms);
+  fill('fltPillar',settings.pillars);
+  fill('fltStatus',STATUSES);
+}
+
+/* ============================================================================
+   SEED (first run) + INIT
+   ========================================================================== */
+// On-brand placeholder visual (inline SVG data URL) for reference until a real image is generated.
+function sampleVisual(label,i){
+  label=String(label||'Post').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const grad=[['#0f2740','#1e4976'],['#173a5e','#0f2740'],['#1e4976','#173a5e'],['#0f2740','#26507d'],['#12314f','#1e4976']];
+  const cxs=[300,120,320,90,220], cys=[80,210,210,90,150];
+  const g=grad[i%grad.length], cx=cxs[i%5], cy=cys[i%5];
+  const svg="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='300'>"
+    +"<defs><linearGradient id='b' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='"+g[0]+"'/><stop offset='1' stop-color='"+g[1]+"'/></linearGradient></defs>"
+    +"<rect width='400' height='300' fill='url(#b)'/>"
+    +"<circle cx='"+cx+"' cy='"+cy+"' r='72' fill='#c9a24b' opacity='0.92'/>"
+    +"<circle cx='"+cx+"' cy='"+cy+"' r='72' fill='none' stroke='#e6c877' stroke-width='3' opacity='0.55'/>"
+    +"<rect x='0' y='248' width='400' height='52' fill='rgba(0,0,0,0.30)'/>"
+    +"<text x='20' y='282' font-family='Segoe UI,Arial' font-size='24' fill='#ffffff' font-weight='700'>"+label+"</text>"
+    +"<text x='378' y='40' text-anchor='end' font-family='Segoe UI,Arial' font-size='15' fill='#c9a24b' font-weight='700'>SAMPLE</text>"
+    +"</svg>";
+  return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+}
+
+function seedIfEmpty(){
+  if(posts.length) return;
+  const base=new Date();
+  const y=base.getFullYear(), m=base.getMonth();
+  const samples=[
+    {d:3,title:'3 questions to ask before you retire',pillar:'Retirement Reality',plat:'LinkedIn',status:'Draft',concept:'Plain-English checklist framing retirement readiness.',video:false,
+      caption:'Thinking about retirement? Start with three simple questions...\n\n1. When do you want to stop working?\n2. What will your monthly life cost?\n3. Where will that income come from?\n\nNo jargon. Just clarity.',
+      comp:'N/A — evergreen educational'},
+    {d:8,title:'Market volatility: staying the course',pillar:'1-Minute Finance',plat:'Facebook',status:'In Review',concept:'Reassuring, general perspective on riding out market swings.',video:false,
+      caption:'Markets move up and down — that is normal. What matters is having a plan you understand and can stick to.',comp:''},
+    {d:14,title:'Client story: planning for aging parents',pillar:'Did You Know?',plat:'Instagram',status:'Idea',concept:'Anonymized story of sandwich-generation planning.',video:true,concept2:''},
+    {d:21,title:'Why we became independent advisers',pillar:'Advisor FAQ',plat:'LinkedIn',status:'Approved',concept:'Short brand-values piece.',video:false,
+      caption:'When we started this firm, we made one promise: advice that puts you first. Here is what that looks like in practice.',comp:'Reviewed — no performance claims. 2026-06-15'}
+  ];
+  samples.forEach((s,i)=>{
+    const p=newPostTemplate(`${y}-${pad(m+1)}-${pad(s.d)}`);
+    p.title=s.title; p.pillar=s.pillar; p.platforms=[s.plat]; p.status=s.status;
+    p.concept=s.concept; p.caption=s.caption||''; p.isVideo=!!s.video;
+    p.complianceNote=s.comp||''; p.owner=settings.owners[0];
+    p.image=sampleVisual((s.pillar||'Post').toUpperCase(), i);
+    p.imageMeta='sample visual (placeholder)';
+    posts.push(p);
+  });
+  persist();
+}
+
+function init(){
+  load();
+  const t=new Date();
+  currentMonth=new Date(t.getFullYear(),t.getMonth(),1);
+  seedIfEmpty();
+  rebuildFilterOptions();
+  render();
+  // keyboard: Esc closes panels
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){
+      if(document.getElementById('briefModal').classList.contains('show'))return closeBrief();
+      if(document.getElementById('menuModal').classList.contains('show'))return closeMenu();
+      if(document.getElementById('editorPanel').classList.contains('show'))return closeEditor();
+    }
+  });
+}
+init();
+</script>
+</body>
+</html>
