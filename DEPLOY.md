@@ -23,18 +23,27 @@ Good for personal/local testing. The key lives in each user's browser (exposed t
 ## Option B — Recommended: app + key-protecting proxy (all free)
 
 ### 1. Deploy the proxy (Cloudflare Workers)
+
+#### 1a. Dashboard method — no terminal, no Node (recommended)
+1. Sign up / log in (free): **https://dash.cloudflare.com** → **Workers & Pages**.
+2. **Create application → Create Worker** → name it `content-studio-proxy` → **Deploy** (creates a starter).
+3. **Edit code** → delete the starter → paste the entire contents of [`proxy/worker.js`](proxy/worker.js) → **Deploy**.
+4. Open the Worker → **Settings → Variables and Secrets** → **Add** these (choose **Secret / Encrypt**):
+   - `OPENAI_API_KEY` = your `sk-...` key
+   - `ALLOW_ORIGIN` = `https://whitmanmarketing.github.io`   ← your live site's origin (scheme + host, **no path/slash**)
+   - `ACCESS_TOKEN` = a shared team password (pick anything strong)
+5. Copy the Worker URL shown at the top, e.g. `https://content-studio-proxy.<your-subdomain>.workers.dev`.
+
+#### 1b. CLI method (only if you have Node installed)
 ```
 npm i -g wrangler
 cd proxy
 wrangler login
-wrangler secret put OPENAI_API_KEY          # paste your sk-... key when prompted
-wrangler secret put ALLOW_ORIGIN            # recommended: your app URL, e.g. https://your-app.pages.dev
-wrangler secret put ACCESS_TOKEN            # recommended: a shared team password
+wrangler secret put OPENAI_API_KEY          # paste your sk-... key
+wrangler secret put ALLOW_ORIGIN            # https://whitmanmarketing.github.io
+wrangler secret put ACCESS_TOKEN            # a shared team password
 wrangler deploy
 ```
-You'll get a URL like `https://content-studio-proxy.<you>.workers.dev`.
-
-(No terminal? Cloudflare dashboard → Workers & Pages → Create Worker → paste `proxy/worker.js` → Settings → Variables and Secrets → add `OPENAI_API_KEY`, `ALLOW_ORIGIN`, `ACCESS_TOKEN` → Deploy.)
 
 **Protections (only active when you set them):**
 - `ALLOW_ORIGIN` → the Worker rejects any request whose Origin isn't your app URL.
