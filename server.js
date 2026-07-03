@@ -81,7 +81,15 @@ const server = http.createServer(async (req, res) => {
     if (!full.startsWith(ROOT)) { res.writeHead(403); return res.end('Forbidden'); } // no traversal
     fs.readFile(full, (err, data) => {
       if (err) { res.writeHead(404); return res.end('Not found'); }
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream' });
+      const ext = path.extname(full).toLowerCase();
+      if (ext === '.html') {
+        // Tell the app to route AI calls through this same origin (this server proxies them).
+        const html = data.toString('utf8')
+          .replace('</head>', '<script>window.__CS_PROXY__=location.origin;</script></head>');
+        res.writeHead(200, { 'Content-Type': MIME['.html'] });
+        return res.end(html);
+      }
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
       res.end(data);
     });
     return;

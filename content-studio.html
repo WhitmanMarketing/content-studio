@@ -1085,7 +1085,12 @@ function stageVideo(p){
    ========================================================================== */
 // Route calls direct to OpenAI (client key) or through a server-side proxy that injects the key.
 function apiCfg(){
-  const base=((settings.proxyBase||'').trim()).replace(/\/+$/,'');
+  let base=((settings.proxyBase||'').trim()).replace(/\/+$/,'');
+  // Auto-detect a same-origin proxy injected by the server (e.g. the Railway deploy).
+  // A manually-set proxy URL in Settings always takes precedence.
+  if(!base && typeof window.__CS_PROXY__==='string' && window.__CS_PROXY__){
+    base=window.__CS_PROXY__.replace(/\/+$/,'');
+  }
   return base ? {base, proxy:true, token:(proxyToken||'').trim()} : {base:'https://api.openai.com', proxy:false, token:''};
 }
 async function callText(system, userContent, maxTokens){
